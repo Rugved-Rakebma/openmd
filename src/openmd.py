@@ -1159,6 +1159,325 @@ def _parse_themes(css_text: str) -> list[tuple[str, str]]:
     return themes
 
 
+# ── LOCAL PATCH — theme-derived Qt chrome ────────────────────────────────────
+# Upstream hardcodes SIDEBAR_CSS (a green panel and green META/HELP buttons) and
+# never lets the active theme reach ANY Qt widget: `self._themes` is read only by
+# the swatch bar. So switching themes restyles the HTML document while the chrome
+# stays green forever, permanently splitting the window into two visual halves.
+#
+# These helpers derive the chrome palette from the same `body.theme-*` block the
+# document already uses, so one CSS theme drives the whole app and the swatch bar
+# actually does what it looks like it does.
+#
+# Deliberately additive: nothing above is modified, and every failure path returns
+# None so the caller falls back to upstream's SIDEBAR_CSS verbatim. See LOCAL.md.
+
+def _hex_rgb(value: str):
+    """'#rgb' / '#rrggbb' -> (r, g, b). None for rgb()/named/empty colours."""
+    if not value:
+        return None
+    v = value.strip().lstrip('#')
+    hexdigits = '0123456789abcdefABCDEF'
+    if len(v) == 3 and all(c in hexdigits for c in v):
+        v = ''.join(c * 2 for c in v)
+    if len(v) != 6 or not all(c in hexdigits for c in v):
+        return None
+    return tuple(int(v[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _hex_str(rgb) -> str:
+    return '#%02x%02x%02x' % tuple(max(0, min(255, int(round(c)))) for c in rgb)
+
+
+def _blend(a, b, t):
+    """Mix two rgb tuples. t=0 -> a, t=1 -> b."""
+    return tuple(a[i] + (b[i] - a[i]) * t for i in range(3))
+
+
+def _shift(rgb, amount):
+    """Lighten (amount > 0) or darken (amount < 0) toward white/black, in percent."""
+    return _blend(rgb, (255, 255, 255) if amount > 0 else (0, 0, 0), abs(amount) / 100.0)
+
+
+def _is_dark(rgb) -> bool:
+    return (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) < 128
+
+
+def _decl(decls: str, prop: str) -> str:
+    m = re.search(prop + r'\s*:\s*([^;]+);', decls)
+    return m.group(1).strip() if m else ''
+
+
+def _theme_palette(css_text: str, theme_name: str):
+    """Derive a chrome palette from one body.theme-<name> block.
+
+    Returns a dict of hex strings, or None when the theme is missing or its
+    colours are not plain hex — rgb()/hsl()/named values are not worth guessing
+    at, and returning None simply keeps upstream's static chrome.
+    """
+    if not theme_name:
+        return None
+    try:
+        name = re.escape(theme_name)
+        block = re.search(r'body\.theme-' + name + r'\s*\{([^}]*)\}', css_text, re.DOTALL)
+        if not block:
+            return None
+        decls = block.group(1)
+        bg = _hex_rgb(_decl(decls, 'background-color'))
+        if not bg:
+            return None
+        fg = _hex_rgb(_decl(decls, 'color')) or ((255, 255, 255) if _is_dark(bg) else (0, 0, 0))
+
+        # Accent: the theme's link colour, else its h1 colour. Both live in rules
+        # OUTSIDE the main block, so they need their own lookups.
+        accent = None
+        for pat in (r'body\.theme-' + name + r'\s+a\b[^{]*\{([^}]*)\}',
+                    r'body\.theme-' + name + r'\s+h1\b[^{]*\{([^}]*)\}'):
+            m = re.search(pat, css_text, re.DOTALL)
+            if m:
+                accent = _hex_rgb(_decl(m.group(1), 'color'))
+                if accent:
+                    break
+        if not accent:
+            accent = _shift(fg, 12 if _is_dark(bg) else -12)
+
+        d = 1 if _is_dark(bg) else -1  # push chrome away from the document background
+        return {
+            'bg':      _hex_str(bg),          # the document background, unmodified
+            'panel':   _hex_str(_shift(bg, 6 * d)),
+            'input':   _hex_str(_shift(bg, 2 * d)),
+            'border':  _hex_str(_shift(bg, 20 * d)),
+            'hover':   _hex_str(_shift(bg, 14 * d)),
+            'text':    _hex_str(fg),
+            'muted':   _hex_str(_blend(fg, bg, 0.45)),
+            'accent':  _hex_str(accent),
+            'onAccent': _hex_str((255, 255, 255) if _is_dark(accent) else (17, 17, 17)),
+        }
+    except Exception:
+        return None
+
+
+def _chrome_css(p) -> str:
+    """Qt stylesheet for the sidebar column. Falls back to upstream's constant."""
+    if not p:
+        return SIDEBAR_CSS
+    return f"""
+QWidget#sidebarCol {{ background: {p['panel']}; border-right: 1px solid {p['border']}; }}
+
+QTreeWidget {{ background: {p['panel']}; color: {p['text']};
+    border: 2px solid transparent; font-size: 14px; }}
+QTreeWidget:focus {{ border: 2px solid {p['accent']}; }}
+QTreeWidget::item {{ padding: 3px 0; }}
+QTreeWidget::item:hover {{ background: {p['hover']}; }}
+QTreeWidget::item:selected {{ background: {p['accent']}; color: {p['onAccent']};
+    border-radius: 2px; }}
+QTreeWidget::item:selected:!active {{ background: {p['hover']}; color: {p['muted']}; }}
+QTreeWidget::item:selected:hover {{ background: {p['accent']}; color: {p['onAccent']}; }}
+
+QLineEdit#searchBox {{ background: {p['input']}; border: 1px solid {p['border']};
+    border-radius: 4px; color: {p['text']}; padding: 4px 8px; font-size: 13px; }}
+QLineEdit#searchBox:focus {{ border: 1px solid {p['accent']}; }}
+
+QPushButton#searchBtn {{ background: {p['hover']}; border: 1px solid {p['border']};
+    border-radius: 4px; color: {p['text']}; font-size: 12px; padding: 4px 8px; }}
+QPushButton#searchBtn:hover {{ background: {p['accent']}; color: {p['onAccent']};
+    border: 1px solid {p['accent']}; }}
+QPushButton#searchBtn:pressed {{ background: {p['border']}; color: {p['text']}; }}
+
+QLabel#tocGuidance {{ color: {p['muted']}; font-size: 10px; margin: 10px 10px 4px 10px; }}
+
+/* Flat and quiet — upstream's green gradient was the loudest thing in the window. */
+QPushButton#metaBtn, QPushButton#helpBtn {{ background: {p['hover']};
+    border: 1px solid {p['border']}; border-radius: 4px; color: {p['muted']};
+    font-weight: bold; font-size: 10px; padding: 0 10px; }}
+QPushButton#metaBtn:hover, QPushButton#helpBtn:hover {{ background: {p['accent']};
+    color: {p['onAccent']}; border: 1px solid {p['accent']}; }}
+QPushButton#metaBtn:pressed, QPushButton#helpBtn:pressed {{ background: {p['border']};
+    color: {p['text']}; }}
+
+/* Upstream declares no QScrollBar rules at all, so the tree fell back to the
+   native macOS scrollbar — a light strip against a dark panel. */
+QScrollBar:vertical {{ background: {p['panel']}; width: 10px; margin: 0; }}
+QScrollBar::handle:vertical {{ background: {p['border']}; border-radius: 5px;
+    min-height: 24px; }}
+QScrollBar::handle:vertical:hover {{ background: {p['muted']}; }}
+QScrollBar:horizontal {{ background: {p['panel']}; height: 10px; margin: 0; }}
+QScrollBar::handle:horizontal {{ background: {p['border']}; border-radius: 5px;
+    min-width: 24px; }}
+QScrollBar::handle:horizontal:hover {{ background: {p['muted']}; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+"""
+
+
+def _swatchbar_css(p) -> str:
+    """Swatch strip container. Upstream hardcodes #0d1117 regardless of theme."""
+    if not p:
+        return "background: #0d1117; border-top: 1px solid #30363d;"
+    return f"background: {p['panel']}; border-top: 1px solid {p['border']};"
+
+
+def _tabbar_css(p) -> str:
+    """Tab bar. Upstream applies NO stylesheet, leaving native light-mode chrome
+    above a dark document — the other half of the two-tone split."""
+    if not p:
+        return ""
+    return f"""
+QTabWidget {{ background: {p['panel']}; }}
+/* The pane spans the full area, tab strip included, so the empty region to the
+   RIGHT of the last tab is pane — not tab bar. It therefore has to carry the
+   unselected-tab colour, or that gap reads as a different surface. The document
+   view covers the pane everywhere else, so this is only ever visible up there. */
+QTabWidget::pane {{ border: 0; background: {p['panel']}; top: 0; }}
+
+/* Left-align the strip. Qt CENTRES the tab bar by default whenever the tabs do
+   not fill the width — the single loudest "this is not a real app" tell. */
+QTabWidget::tab-bar {{ alignment: left; left: 0; }}
+
+/* drawBase off: Qt otherwise paints its own native base line under the strip,
+   which is what made the row look shaded rather than flat. */
+QTabBar {{ background: {p['panel']}; qproperty-drawBase: 0; }}
+
+/* Close-button geometry, measured rather than assumed — the two spacings come
+   from DIFFERENT properties and neither behaves the way CSS would suggest:
+     label -> ×      = padding-right  (Qt already reserves the button's width in
+                       layout, so padding-right is not shared with it — it lands
+                       entirely in this gap)
+     ×     -> edge   = close-button margin-right  (padding-right does NOT inset
+                       the button; it is positioned against the tab rect)
+   So: 12px | label | 8px | × | 12px.
+   No borders, no radius, no gaps — a flat band, not floating chips. */
+QTabBar::tab {{
+    background: {p['panel']};
+    color: {p['muted']};
+    border: 0;
+    border-right: 1px solid {p['border']};
+    padding: 7px 8px 7px 12px;
+    margin: 0;
+}}
+/* Selected takes the DOCUMENT background, so the tab reads as continuous with
+   the page below it rather than as a button sitting on top of it. */
+QTabBar::tab:selected {{ background: {p['bg']}; color: {p['text']}; }}
+QTabBar::tab:!selected:hover {{ background: {p['hover']}; color: {p['text']}; }}
+
+QTabBar::close-button {{
+    subcontrol-position: right;
+    margin-right: 12px;
+    width: 12px; height: 12px;
+}}
+"""
+# ── end LOCAL PATCH ──────────────────────────────────────────────────────────
+
+
+# ── LOCAL PATCH — single instance: new files become tabs, not new windows ────
+# Upstream has no IPC of any kind, so every `openmd <file>` starts a fresh process
+# and a fresh window. `MDPreviewWindow.open_tab()` already does exactly the right
+# thing (dedupes to an existing tab, caps at 12, replaces the active tab past that)
+# — it was simply unreachable from a second process.
+#
+# The handoff happens in the PARENT, before openmd's detached re-exec, so a second
+# open costs one UNIX-socket write instead of a full ~1.2 GB Qt/Chromium startup.
+#
+# Imports are local to this block, and QtCore is re-imported under an alias, so the
+# patch never touches upstream's import lines and cannot conflict there.
+import socket as _socket
+from PySide6.QtCore import QObject as _QObject
+
+_IPC_PATH = f"/tmp/openmd-{os.getuid()}.sock" if sys.platform != 'win32' else None
+
+
+def _single_instance_enabled(cfg) -> bool:
+    """Config escape hatch: [display] single_instance = false restores one-window-per-file."""
+    try:
+        return cfg.getboolean('display', 'single_instance', fallback=True)
+    except Exception:
+        return True
+
+
+def _send_to_running_instance(paths) -> bool:
+    """Hand paths to an already-running openmd. True only if actually delivered."""
+    if not _IPC_PATH or not paths:
+        return False
+    try:
+        s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        s.settimeout(1.0)
+        s.connect(_IPC_PATH)
+        s.sendall(('\n'.join(os.path.abspath(p) for p in paths) + '\n').encode('utf-8'))
+        s.close()
+        return True
+    except (ConnectionRefusedError, FileNotFoundError):
+        # Refused means the socket file outlived a crashed instance. Clear it so the
+        # window we are about to start can bind. Narrow on purpose: a broader except
+        # would delete the socket of an instance that was merely slow to answer.
+        try:
+            if os.path.exists(_IPC_PATH):
+                os.unlink(_IPC_PATH)
+        except OSError:
+            pass
+        return False
+    except Exception:
+        return False
+
+
+class _InstanceServer(_QObject):
+    """Listen for paths sent by later launches; emit one signal per path.
+
+    The accept loop runs on a daemon thread, so `fileReceived` crosses threads and
+    Qt delivers it queued onto the GUI thread — `open_tab` is never touched off-thread.
+    """
+    fileReceived = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._sock = None
+        if not _IPC_PATH:
+            return
+        try:
+            if os.path.exists(_IPC_PATH):
+                os.unlink(_IPC_PATH)          # stale socket from a crashed instance
+            s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            s.bind(_IPC_PATH)
+            os.chmod(_IPC_PATH, 0o600)        # anything that writes here opens files as you
+            s.listen(8)
+            self._sock = s
+            threading.Thread(target=self._accept_loop, daemon=True).start()
+        except Exception:
+            self._sock = None                 # degrade to upstream one-window-per-file
+
+    def _accept_loop(self):
+        while True:
+            try:
+                conn, _ = self._sock.accept()
+            except Exception:
+                return                        # socket closed on quit
+            try:
+                data = conn.recv(65536).decode('utf-8', 'replace')
+            except Exception:
+                data = ''
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            for line in data.splitlines():
+                path = line.strip()
+                if path:
+                    self.fileReceived.emit(path)
+
+    def close(self):
+        try:
+            if self._sock:
+                self._sock.close()
+        except Exception:
+            pass
+        try:
+            if _IPC_PATH and os.path.exists(_IPC_PATH):
+                os.unlink(_IPC_PATH)
+        except Exception:
+            pass
+# ── end LOCAL PATCH ──────────────────────────────────────────────────────────
+
+
 def _load_config() -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
     cfg.read(CONFIG_PATH, encoding='utf-8')
@@ -1413,13 +1732,22 @@ class FilePreviewWidget(QWidget):
         self._populate_sidebar(toc_html)
 
         # --- Theme swatch bar at the foot of the sidebar ---
-        self._swatch_bar = self._build_swatch_bar()
+        # LOCAL PATCH: the theme picker is off by default — this install ships one
+        # finished theme, and 16 raw colour chips (several near-white) were the
+        # highest-contrast object in a window whose entire job is quiet reading.
+        # Re-enable with [display] show_theme_picker = true.
+        self._show_theme_picker = self.cfg.getboolean(
+            'display', 'show_theme_picker', fallback=False)
+        self._swatch_bar = self._build_swatch_bar() if self._show_theme_picker else None
 
         # --- Sidebar column: tree + swatch bar ---
         sidebar_col = QWidget()
         sidebar_col.setObjectName("sidebarCol")
         sidebar_col.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        sidebar_col.setStyleSheet(SIDEBAR_CSS)
+        # LOCAL PATCH: chrome follows the active theme (falls back to SIDEBAR_CSS).
+        # Kept on self so _apply_theme can restyle it live on a swatch click.
+        self._sidebar_col = sidebar_col
+        sidebar_col.setStyleSheet(_chrome_css(self._chrome_palette()))
         
         self.sidebar_opacity = QGraphicsOpacityEffect(self)
         self.sidebar_opacity.setOpacity(1.0)
@@ -1484,7 +1812,8 @@ class FilePreviewWidget(QWidget):
 
         sidebar_layout.addLayout(btn_row)
         sidebar_layout.addSpacing(24)  # Spacer before swatches
-        sidebar_layout.addWidget(self._swatch_bar)
+        if self._swatch_bar is not None:      # LOCAL PATCH: see show_theme_picker
+            sidebar_layout.addWidget(self._swatch_bar)
 
         # --- Web view ---
         self.view = QWebEngineView()
@@ -1555,7 +1884,8 @@ class FilePreviewWidget(QWidget):
         self._themes = _parse_themes(user_css)  # [(name, bg_color), ...]
 
         bar = QWidget()
-        bar.setStyleSheet("background: #0d1117; border-top: 1px solid #30363d;")
+        self._swatch_bar_widget = bar  # LOCAL PATCH: restyled on theme change
+        bar.setStyleSheet(_swatchbar_css(self._chrome_palette()))
         layout = QHBoxLayout(bar)
         layout.setContentsMargins(6, 4, 6, 4)
         layout.setSpacing(4)
@@ -1575,10 +1905,37 @@ class FilePreviewWidget(QWidget):
         layout.addStretch()
         return bar
 
+    def _chrome_palette(self):
+        """LOCAL PATCH: chrome palette for the active theme, or None to fall back."""
+        try:
+            return _theme_palette(_load_user_css(), self._current_theme)
+        except Exception:
+            return None
+
+    def _restyle_chrome(self):
+        """LOCAL PATCH: repaint the Qt widgets to match the active theme.
+
+        Upstream has no equivalent — chrome is styled once at construction from a
+        constant, so a theme switch could never reach it.
+        """
+        p = self._chrome_palette()
+        try:
+            if getattr(self, '_sidebar_col', None) is not None:
+                self._sidebar_col.setStyleSheet(_chrome_css(p))
+            if getattr(self, '_swatch_bar_widget', None) is not None:
+                self._swatch_bar_widget.setStyleSheet(_swatchbar_css(p))
+            win = self.window()
+            tabs = getattr(win, 'tab_widget', None)
+            if tabs is not None:
+                tabs.setStyleSheet(_tabbar_css(p))
+        except Exception:
+            pass  # chrome is cosmetic; never let it break a theme switch
+
     def _apply_theme(self, theme_name: str):
         """Apply a theme by setting a class on <body>."""
         self._current_theme = theme_name
         _set_saved_theme(self.cfg, theme_name)
+        self._restyle_chrome()  # LOCAL PATCH: keep Qt chrome in step with the document
         self.view.page().runJavaScript(
             "try { if(document.body) document.body.className = 'theme-" + theme_name + "';"
             " if(typeof _openmd_shade_even_rows==='function') _openmd_shade_even_rows();"
@@ -2281,6 +2638,16 @@ class MDPreviewWindow(QMainWindow):
         self._shortcut_copy_text.setContext(Qt.WindowShortcut)
         self._shortcut_copy_text.activated.connect(self._copy_current_text)
 
+        # LOCAL PATCH: style the tab bar from the active theme. Upstream applies no
+        # stylesheet here at all, so the tab strip rendered in native macOS light
+        # chrome above a dark document — the other half of the two-tone split.
+        try:
+            self.tab_widget.setStyleSheet(
+                _tabbar_css(_theme_palette(_load_user_css(),
+                                           _get_saved_theme(_load_config()))))
+        except Exception:
+            pass  # cosmetic only
+
         # Tab close setup
         self.tab_widget.setTabsClosable(True)
         self.tab_widget.tabCloseRequested.connect(self._close_tab)
@@ -2831,6 +3198,18 @@ def main():
         _save_last_file(cfg, md_files[0])
 
 
+    # LOCAL PATCH: if a window is already up, hand it the paths and stop here —
+    # before the re-exec below, so no second Qt process is ever started.
+    # Skipped for stdin mode: that path owns a temp file the running instance
+    # would have no way to clean up.
+    if (sys.platform != 'win32'
+            and os.environ.get('_OPENMD_CHILD') != '1'
+            and not _stdin_temp
+            and md_files
+            and _single_instance_enabled(cfg)
+            and _send_to_running_instance(md_files)):
+        os._exit(0)
+
     # Re-exec as a detached child if needed
     if sys.platform != 'win32' and os.environ.get('_OPENMD_CHILD') != '1':
         env = os.environ.copy()
@@ -2873,6 +3252,20 @@ def main():
             # an "Error loading file" message in the display pane.
             app.aboutToQuit.connect(_cleanup_stdin_temp)
         window = MDPreviewWindow(tab_widget, cfg)
+
+        # LOCAL PATCH: serve later launches into this window as tabs.
+        if _single_instance_enabled(cfg):
+            _instance_server = _InstanceServer(window)
+
+            def _open_from_ipc(path, _w=window):
+                _w.open_tab(path)             # dedupes, caps at 12 — see open_tab
+                _w.show()
+                _w.raise_()
+                _w.activateWindow()
+
+            _instance_server.fileReceived.connect(_open_from_ipc)
+            app.aboutToQuit.connect(_instance_server.close)
+
         window.show()
         sys.exit(app.exec())
     except Exception as e:
