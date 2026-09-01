@@ -115,6 +115,32 @@ Verified: handoff, tab dedupe on reopen, and recovery from a `SIGKILL`-orphaned 
 
 **On upstream pull:** if upstream ever adds its own single-instance handling, drop this entirely.
 
+### 4. Durable config split from runtime state — `src/openmd.py`
+
+Upstream writes settings **and** state to `~/.openmd.config`: `theme` and `show_meta` sit alongside
+`[history] last_file` and `[update] last_check`, which rewrite on every launch and every update
+poll. A settings file that rewrites itself cannot be version-controlled — so the theme pin could
+not be backed up without leaving the dotfile repo permanently dirty, which trains you to ignore
+the one signal that catches real drift.
+
+Third fenced block, entirely inside `_load_config` / `_save_config`:
+
+| Path | Holds |
+|---|---|
+| `~/.openmd.config` | everything **not** in `_STATE_SECTIONS` — i.e. settings |
+| `~/.local/state/openmd/state.ini` | `[history]`, `[update]` |
+
+- **The bias is deliberate:** sections are excluded by name, so a future *settings* section lands
+  in the tracked file by default and only known-churning ones are split out.
+- **Self-migrating** — an existing config carrying those sections is split on the next save.
+- **No call site changed.** Every reader and writer already funnelled through these two functions,
+  and both still see one merged `ConfigParser`.
+
+Verified: `~/.openmd.config` is byte-identical across repeated opens; `state.ini` absorbs the churn.
+
+**On upstream pull:** if upstream adds a new settings section it lands in the config file
+automatically. If it adds a new *churning* one, add its name to `_STATE_SECTIONS`.
+
 ## Not changed, deliberately
 
 - `SIDEBAR_CSS` / `VIEW_CSS` constants — kept verbatim as the fallback path

@@ -1478,9 +1478,27 @@ class _InstanceServer(_QObject):
 # ── end LOCAL PATCH ──────────────────────────────────────────────────────────
 
 
+# ── LOCAL PATCH — split durable config from runtime state ────────────────────
+# Upstream writes BOTH to ~/.openmd.config: your settings, and `last_file` /
+# `last_check`, which change on every launch and every update poll. A settings
+# file that rewrites itself constantly cannot be version-controlled — it would
+# leave the dotfile backup permanently dirty, which trains you to ignore the one
+# signal that catches real drift.
+#
+# Sections listed here go to a state file; EVERYTHING ELSE stays in the config
+# file. The bias is deliberate: a future settings section lands in the tracked
+# file by default, and only things explicitly known to churn are excluded.
+#
+# Self-migrating: an existing ~/.openmd.config carrying these sections is split
+# on the next save. Both call sites still see one merged ConfigParser, so no
+# reader or writer of the config changed.
+_STATE_SECTIONS = ('history', 'update')
+STATE_PATH = os.path.expanduser('~/.local/state/openmd/state.ini')
+
+
 def _load_config() -> configparser.ConfigParser:
     cfg = configparser.ConfigParser()
-    cfg.read(CONFIG_PATH, encoding='utf-8')
+    cfg.read([CONFIG_PATH, STATE_PATH], encoding='utf-8')   # merged; state wins
     if not cfg.has_section('display'):
         cfg.add_section('display')
     if not cfg.has_option('display', 'show_meta'):
@@ -1489,8 +1507,23 @@ def _load_config() -> configparser.ConfigParser:
 
 
 def _save_config(cfg: configparser.ConfigParser):
-    with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
-        cfg.write(f)
+    """Write settings to CONFIG_PATH and churning state to STATE_PATH."""
+    def _write(path, sections):
+        part = configparser.ConfigParser()
+        for name in sections:
+            part.add_section(name)
+            for k, v in cfg.items(name):
+                part.set(name, k, v)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w', encoding='utf-8') as f:
+            part.write(f)
+
+    present = cfg.sections()
+    _write(CONFIG_PATH, [s for s in present if s not in _STATE_SECTIONS])
+    state = [s for s in present if s in _STATE_SECTIONS]
+    if state:
+        _write(STATE_PATH, state)
+# ── end LOCAL PATCH ──────────────────────────────────────────────────────────
 
 
 def _get_saved_theme(cfg: configparser.ConfigParser) -> str:
