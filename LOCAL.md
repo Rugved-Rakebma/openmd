@@ -11,9 +11,8 @@ edits, so every entry is a potential conflict.
 ## Why this fork exists
 
 openmd has **two rendering surfaces**: the markdown pane is HTML in a `QWebEngineView` and is
-fully themeable via `~/.openmd.css`; everything else — sidebar panel, TOC tree, search box,
-META/HELP buttons, swatch strip, tab bar — is **native Qt widgets styled from hardcoded
-constants**. Upstream reads the active theme in exactly two places, both inside the swatch bar,
+fully themeable via CSS; everything else — sidebar panel, TOC tree, META/HELP buttons, swatch
+strip, tab bar — is **native Qt widgets styled from hardcoded constants**. Upstream reads the active theme in exactly two places, both inside the swatch bar,
 so no theme can ever reach the chrome.
 
 The result out of the box is a window split in two: a themed document beside a bright green
@@ -26,8 +25,8 @@ That is not fixable by configuration. Hence the fork.
 **One CSS theme drives the whole application.** Chrome colours are *derived* from the same
 `body.theme-*` block the document uses — they are never written down twice.
 
-Consequence: all future **design** work happens in `~/.openmd.css`, in **zero** Python. Change 2
-below is meant to be the last styling change ever made here.
+Consequence: all future **design** work happens in `src/openmd-default.css`, in **zero** Python.
+(Change 5 moved that file from `~/.openmd.css` into the repo; Change 2 originally said `$HOME`.)
 
 Change 3 (single instance) is a separate axis — behaviour, not appearance — and could not be
 config either, since upstream ships no IPC at all. Each new Python change should have to justify
@@ -141,12 +140,74 @@ Verified: `~/.openmd.config` is byte-identical across repeated opens; `state.ini
 **On upstream pull:** if upstream adds a new settings section it lands in the config file
 automatically. If it adds a new *churning* one, add its name to `_STATE_SECTIONS`.
 
+### 5. The checkout is the stylesheet — `src/openmd.py`, `src/openmd-default.css`
+
+`_load_user_css()` auto-seeded `$HOME/.openmd.css` from the bundled default on first run and then
+preferred that copy forever. Under an **editable** install that inverts the point of the fork:
+the file that actually renders is an untracked copy in `$HOME`, so editing the checkout appears
+to do nothing, and every design change lives outside git.
+
+- **Seeding removed**, along with the `$HOME` lookup that only existed to read what it wrote.
+- **cwd lookup removed** — `os.getcwd()/.openmd.css` was tried *first*, and openmd's working
+  directory is wherever it was launched from. Any directory containing a `.openmd.css` could
+  silently restyle the app. Same class of hazard as resolving an executable from the cwd.
+- Remaining chain is fallback-only: install-dir `.openmd.css` (explicit override) →
+  `src/openmd-default.css` → packaged data-file → `DEFAULT_THEME_CSS`.
+- `DEFAULT_THEME_CSS` is now labelled last-resort and **deliberately not synced** — it stays
+  upstream-vintage so a broken install still renders.
+- `_get_saved_theme` falls back to `DEFAULT_THEME = 'obsidian'` instead of `''`, so a missing
+  `~/.openmd.config` yields the right theme rather than no theme.
+- The duplicate `.openmd.css` at the repo root was deleted — packaged by nothing, read by
+  nothing once the cwd lookup was gone. (Same shape as Change 1.)
+
+**Consequence, superseding Change 2's wording:** design work happens in
+`src/openmd-default.css`, in the repo, in zero Python.
+
+### 6. Obsidian theme, and the chrome that was fighting it — `src/openmd-default.css`, `src/openmd.py`
+
+A port of Obsidian 1.12.7's default dark theme, values taken from its shipped `app.css`.
+Headings use the body font at `inherit` colour; tables have no zebra and no header tint; accent
+purple appears only on links and the blockquote bar.
+
+Removed alongside it, because each one contradicted the theme:
+
+| Removed | Why |
+|---|---|
+| Google Fonts `@import` (11 families) | fetched on every render; none installed locally; offline the typography collapsed. The Obsidian stack resolves to SF Pro on macOS — no webfont at all |
+| KaTeX + Mermaid CDN scripts | 4 more requests per file, for features this install does not use. **The render path now makes no network calls** |
+| Document dim + `#58a6ff` inset border on focus | a hardcoded GitHub blue matching no theme, and a rule that washed the page out whenever you touched the sidebar |
+| Sidebar `QGraphicsOpacityEffect` (0.6 on blur) | faded the TOC almost permanently, its one job being legibility |
+| `QTreeWidget:focus` accent ring | a saturated box, the brightest object on screen |
+| Accent-filled TOC selection and META/HELP hover | Obsidian's active nav item is a grey wash with text colour unchanged; both are grey steps now |
+| Sidebar `border-right`, lightened panel background | the splitter dot is boundary enough |
+| Search box, Find button, `Cmd+F`, `_SearchLineEdit`, `focusSearchRequested` | two permanent rows of chrome; Qt's `findText` highlight is also the one thing on the page that cannot be themed |
+| Window title `openmd (x.y.z) by RufusLin` | now `Open MD` |
+
+Front-matter went from a hidden, `<br>`-joined `yaml.dump` blob to a **properties table**
+(`_properties_html`) — 9em muted label column, list values as pills, `tags` as filled accent
+pills, URLs linkified — and `show_meta` now defaults **true**. Obsidian's three truncation rules
+(row `overflow:hidden`, key ellipsis, 3-line clamp) were ported and then deliberately reversed:
+they work there because clicking a value expands it, and this view is read-only. A filename
+**inline title** sits above it.
+
+Two traps worth knowing before editing:
+
+- **The unscoped `#meta` rule** in `openmd.py`'s `CSS` constant styles the panel as a monospace
+  `pre-wrap` box. Overriding background and border is not enough — `font-family` and
+  `white-space` still inherit, so the theme resets them explicitly.
+- **`_openmd_shade_even_rows()` writes inline styles**, so CSS cannot override it. It early-returns
+  on `theme-obsidian` instead.
+
 ## Not changed, deliberately
 
 - `SIDEBAR_CSS` / `VIEW_CSS` constants — kept verbatim as the fallback path
 - HELP dialog (mint-green SVG blobs) and the update popup — both transient, not worth the diff
-- Mermaid `theme:'dark'` pin — revisit only if a light document theme is adopted
+- HELP dialog window title still reads `openmd – Quick Help`
+- The 16 legacy themes — still present and still swatch-selectable, though their display fonts
+  went with the Google Fonts import, so they now fall back to system faces
 - `_parse_themes` — untouched, so the swatch bar keeps working exactly as upstream intends
+- The mermaid `<pre class="mermaid">` pre-processing in `_render_markdown_core` — harmless with
+  the script gone (blocks render as plain code), and removing it would widen the diff
 
 ## Install
 

@@ -87,11 +87,12 @@ remotemd() {
 - **Meta panel** — shows YAML front‑matter in a hidden-by-default div; toggle via the **META** button or the **M** shortcut key
 - **Quick Help** — access a concise help dialog with navigation and shortcuts via the **HELP** button or the **H** shortcut key
 - **Instant launch** — the shell prompt returns immediately; openmd runs as a fully detached GUI app (no `&` needed, no blocking)
-- **GitHub-dark theme by default** — comfortable reading in low-light environments
-- **16 built-in themes** — dark and light, switch instantly via the swatch bar at the bottom of the sidebar; fully customizable via `.openmd.css`
+- **Obsidian dark theme by default** — a port of Obsidian's own default dark, with YAML front matter rendered as a properties table
+- **17 built-in themes** — switch instantly via the swatch bar at the bottom of the sidebar; fully customizable via `src/openmd-default.css`
+- **No network calls** — no webfonts, no CDN scripts; renders identically offline
 - **Live reload** — the display pane updates instantly when the file is saved; no manual refresh needed
-- **Mermaid diagrams** — fenced mermaid blocks render automatically via CDN
-- **KaTeX math** — inline `$…$` and display `$$…$$` expressions render out of the box
+- **Mermaid diagrams** — *disabled in this fork* (fenced mermaid blocks render as plain code)
+- **KaTeX math** — *disabled in this fork*
 - **Sidebar TOC** — hierarchical (H1 → H2 → H3); click or press Return to jump to any heading. The sidebar takes up 20% of your screen, and you can easily jump between the sidebar and display using the left/right arrow keys.
 - **Dynamic Pane Focus** — unselected panes automatically dim to 60% opacity so you always know exactly where your keyboard focus is.
 - **Unix pipes** - accepts markdown from stdin, e.g. ```echo 'markdown string here' | openmd```
@@ -106,21 +107,37 @@ remotemd() {
 
 ## Theming with `.openmd.css`
 
-**Preview:** Open ```openmd-preview-themes.html``` in a browser to see what the 16 themes look like.
-**Customization:** On first launch, openmd automatically populates your home directory with the default CSS (```$HOME/.openmd.css #note the dot```). Edit this file to customize your themes.
+**Edit `src/openmd-default.css`.** That file is the stylesheet — there is no copy to keep in sync.
 
-openmd ships with 16 built-in themes (8 dark, 8 light) selectable from the swatch bar. On first run, default theme CSS is auto-seeded to `$HOME/.openmd.css`. To customize further, edit `.openmd.css` — any rule you write overrides or extends the defaults via normal CSS cascade.
+> **This fork differs from upstream here.** Upstream auto-seeded `$HOME/.openmd.css` on first
+> run and then preferred that copy forever, so editing the checkout appeared to do nothing
+> while the file that actually rendered sat untracked in your home directory. The seeding, the
+> home-directory lookup, and the working-directory lookup have all been removed. The working
+> directory one was also a hazard: openmd's cwd is wherever it was launched from, so any
+> directory containing a `.openmd.css` could silently restyle the app.
 
 **Lookup order** (first match wins):
 
 | Priority | Location |
 |----------|----------|
-| 1 | Current working directory (`./`) |
-| 2 | openmd install directory |
-| 3 | Home directory (`~/`) |
-| 4 | Bundled default theme CSS |
+| 1 | `.openmd.css` in the install directory — explicit opt-in override |
+| 2 | **`src/openmd-default.css` — the real one** |
+| 3 | `<sys.prefix>/share/openmd/openmd-default.css` — packaged data-file |
+| 4 | `DEFAULT_THEME_CSS` embedded in `openmd.py` — broken-install fallback |
 
-To make your own CSS themes, add `body.theme-yourname { ... }` blocks to your `.openmd.css`. The swatch bar automatically discovers and displays the first 16 themes defined there.
+**Active theme: `obsidian`** — a port of Obsidian's default dark theme, at the bottom of the
+file. It is also the default baked into `_get_saved_theme()`, so no `~/.openmd.config` is
+needed. It uses no webfonts: the stack resolves to SF Pro on macOS, which is what Obsidian
+itself renders with. The Google Fonts `@import` that pulled eleven families on every render is
+gone, as are the KaTeX and Mermaid CDN scripts — the render path makes no network calls.
+
+The sixteen legacy themes are still there and still selectable from the swatch bar, but their
+display fonts came from that `@import`, so they now fall back to system faces.
+
+To add a theme, write a `body.theme-yourname { ... }` block. The swatch bar discovers the first
+16 automatically. Put `color:` before `background-color:` in the block — `_theme_palette()`
+scrapes both with an unanchored regex to build the Qt chrome, and the wrong order makes it
+match the tail of `background-color` and silently fall back.
 
 ---
 
