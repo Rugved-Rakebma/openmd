@@ -214,7 +214,7 @@ Two traps worth knowing before editing:
 Editable, so edits here take effect on the next launch with no rebuild:
 
 ```bash
-uv tool install --editable ~/code/openmd
+uv tool install --editable ~/agent-earth/projects/local-apps/openmd
 python -c "import openmd; print(openmd.__file__)"   # must print this checkout
 ```
 
